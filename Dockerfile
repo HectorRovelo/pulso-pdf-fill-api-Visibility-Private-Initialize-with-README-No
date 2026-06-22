@@ -9,7 +9,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py ./app.py
-COPY templates ./templates
+RUN mkdir -p /app/templates
+COPY AXA-Informe-Medico-GMM-FEB22.pdf ./templates/AXA-Informe-Medico-GMM-FEB22.pdf
 
 RUN mkdir -p /app/generated
 ENV GENERATED_DIR=/app/generated
