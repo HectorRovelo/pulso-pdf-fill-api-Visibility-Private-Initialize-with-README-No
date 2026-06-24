@@ -116,6 +116,14 @@ def short(value: str, length: int = 75) -> str:
     return value if len(value) <= length else value[: length - 3].rstrip() + "..."
 
 
+def first_value(data: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = clean(data.get(key))
+        if value:
+            return value
+    return ""
+
+
 def build_axa_values(data: FillRequest) -> dict[str, str]:
     paciente = data.paciente
     clinico = data.clinico
@@ -175,7 +183,11 @@ def build_axa_values(data: FillRequest) -> dict[str, str]:
         "Diagnóstico indicando si es unilateral o bilateral derecho o izquierdo": diagnostico,
         "Código ICD": clean(clinico.get("codigo_icd")),
         "Estadificación TNM": clean(clinico.get("estadificacion_tnm")),
-        "Señale los datos relevantes de exploración física": clean(clinico.get("exploracion_fisica")),
+        "Señale los datos relevantes de exploración física": first_value(
+            clinico,
+            "exploracion_fisica",
+            "exploración_fisica",
+        ),
         "Describa los estudios de laboratorio yo gabinete que realizaron para confirmar el diagnóstico con su interpretación": estudios_texto,
         "Tratamiento propuesto quirúrgico no quirúrgico": plan,
         "Detalle de evolución": clean(clinico.get("detalle_evolucion")) or observaciones,
