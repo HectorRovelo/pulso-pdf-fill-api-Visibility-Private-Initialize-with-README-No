@@ -41,10 +41,12 @@ FORMAT_REGISTRY = {
 
 class FillRequest(BaseModel):
     formato_pdf: str = Field(default="")
+    raw_text: str = Field(default="")
     paciente: dict[str, Any] = Field(default_factory=dict)
     administrativo: dict[str, Any] = Field(default_factory=dict)
     clinico: dict[str, Any] = Field(default_factory=dict)
     medico: dict[str, Any] = Field(default_factory=dict)
+    solicitud: dict[str, Any] = Field(default_factory=dict)
 
 
 app = FastAPI(title="Pulso AI PDF Fill API", version="1.0.0")
@@ -122,6 +124,98 @@ def first_value(data: dict[str, Any], *keys: str) -> str:
         if value:
             return value
     return ""
+
+
+def normalize_spaces(value: str) -> str:
+    return re.sub(r"\s+", " ", clean(value))
+
+
+def raw_request_text(data: FillRequest) -> str:
+    return normalize_spaces(
+        clean(data.raw_text)
+        or clean(data.solicitud.get("texto_original"))
+        or clean(data.clinico.get("observaciones"))
+    )
+
+
+def match_group(pattern: str, text: str, group: int = 1) -> str:
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    return normalize_spaces(match.group(group)) if match else ""
+
+
+def text_after_label(text: str, labels: str, stop_labels: str) -> str:
+    pattern = rf"(?:{labels})\s*:?\s*(.+?)(?=\s+(?:{stop_labels})\s*:|\s*$)"
+    return match_group(pattern, text)
+
+
+def format_talla(value: str) -> str:
+    value = clean(value).replace(",", ".")
+    if not value:
+        return ""
+    try:
+        number = float(value)
+    except ValueError:
+        return value
+    if number > 10:
+        number = number / 100
+    return f"{number:.2f} m"
+
+
+def extracted_from_raw_text(text: str) -> dict[str, dict[str, str]]:
+    if not text:
+        return {"paciente": {}, "clinico": {}, "medico": {}}
+
+    stop = (
+        "peso|talla|estatura|tension arterial|tensión arterial|presion arterial|"
+        "presión arterial|diagnostico actual|diagnóstico actual|fecha de diagnostico|"
+        "fecha de diagnóstico|exploracion fisica|exploración física|medico|médico|"
+        "dr|dra|cedula|cédula|telefono|teléfono"
+    )
+
+    paciente = {
+        "peso": match_group(r"\b(?:peso|pesa)\s*:?\s*(\d{2,3}(?:[\.,]\d+)?)\s*(?:kg|kilos?)?\b", text),
+        "talla": format_talla(
+            match_group(r"\b(?:talla|estatura|mide)\s*:?\s*(\d(?:[\.,]\d{1,2})|\d{2,3})\s*(?:m|mts|metros|cm)?\b", text)
+        ),
+        "tension_arterial": match_group(
+            r"\b(?:tension arterial|tensión arterial|presion arterial|presión arterial|TA)\s*:?\s*(\d{2,3}\s*/\s*\d{2,3})(?:\s*mmhg)?\b",
+            text,
+        ),
+    }
+
+    clinico = {
+        "diagnostico": text_after_label(text, "diagnostico actual|diagnóstico actual|diagnostico|diagnóstico", stop),
+        "fecha_diagnostico": match_group(
+            r"(?:fecha de diagnostico|fecha de diagnóstico)\s*:?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})",
+            text,
+        ),
+        "exploracion_fisica": text_after_label(text, "exploracion fisica|exploración física", stop),
+    }
+
+    medico_text = match_group(
+        r"(?:medico|médico)\s*:?\s*((?:dr\.?|dra\.?)?\s*[^,;]+?)(?=,\s*c[eé]dula|,\s*tel[eé]fono|;|$)",
+        text,
+    )
+    if not medico_text:
+        medico_text = match_group(r"\b((?:dr\.?|dra\.?)\s+[A-ZÁÉÍÓÚÑ][^,;]+)", text)
+    medico_text = re.sub(r"^(?:dr\.?|dra\.?)\s+", "", medico_text, flags=re.IGNORECASE)
+    medico = {
+        "nombre": medico_text,
+        "cedula_profesional": match_group(r"c[eé]dula profesional\s*:?\s*(\d+)", text),
+        "cedula_especialidad": match_group(r"c[eé]dula (?:de )?especialidad\s*:?\s*(\d+)", text),
+        "telefono": match_group(r"(?:tel[eé]fono medico|tel[eé]fono del medico|tel[eé]fono)\s*:?\s*(\+?\d[\d\s]{7,})", text),
+    }
+
+    return {"paciente": paciente, "clinico": clinico, "medico": medico}
+
+
+def apply_raw_extractions(data: FillRequest) -> None:
+    extracted = extracted_from_raw_text(raw_request_text(data))
+    for section_name, values in extracted.items():
+        section = getattr(data, section_name)
+        for key, value in values.items():
+            if value and not clean(section.get(key)):
+                section[key] = value
 
 
 def build_axa_values(data: FillRequest) -> dict[str, str]:
@@ -263,6 +357,7 @@ def formats() -> dict[str, Any]:
 
 @app.post("/fill-pdf")
 def fill_pdf_endpoint(payload: FillRequest, request: Request) -> dict[str, Any]:
+    apply_raw_extractions(payload)
     requested_format = requested_format_name(payload)
     format_id, format_info = resolve_format(requested_format)
     if not format_info:
